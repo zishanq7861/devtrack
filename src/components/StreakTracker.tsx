@@ -1,14 +1,22 @@
 "use client";
-
-import { useCallback, useEffect, useState } from "react";
+import SectionHeader from "./SectionHeader";
+import { useCallback, useEffect, useState, useRef } from "react";
 import { useAccount } from "@/components/AccountContext";
 import { useCountUp } from "@/hooks/useCountUp";
+import StreakMilestoneBanner from "@/components/StreakMilestoneBanner";
+import { useHeatmapTheme } from "@/hooks/useHeatmapTheme";
+import { toast } from "sonner";
+import { toPng } from "html-to-image";
+import { Flame, Trophy, Calendar, Zap, Copy, CheckCircle, Medal, Star, Sparkles } from "lucide-react";
+
+const STREAK_MILESTONES = [7, 30, 50, 100, 200, 365];
 
 interface StreakData {
   current: number;
   longest: number;
   lastCommitDate: string | null;
   totalActiveDays: number;
+  freezeDates: string[];
 }
 
 interface ContributionData {
@@ -19,13 +27,17 @@ interface ContributionData {
 
 interface FreezeData {
   hasFreeze: boolean;
+  freezeDate?: string | null;
 }
 
 export default function StreakTracker() {
   const { selectedAccount } = useAccount();
   const [data, setData] = useState<StreakData | null>(null);
   const [contributionData, setContributionData] = useState<ContributionData | null>(null);
+  const [freezeDates, setFreezeDates] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
+  const [dismissedMilestones, setDismissedMilestones] = useState<number[]>([]);
+  const [lastCelebratedMilestone, setLastCelebratedMilestone] = useState<number>(0);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [minutesAgo, setMinutesAgo] = useState(0);
   const [copied, setCopied] = useState(false);
@@ -35,10 +47,32 @@ export default function StreakTracker() {
   const [freezeLoading, setFreezeLoading] = useState(true);
   const [cancelling, setCancelling] = useState(false);
   const [confirmCancel, setConfirmCancel] = useState(false);
+  const [isDownloading, setIsDownloading] = useState(false);
+
+  const containerRef = useRef<HTMLDivElement>(null);
 
   const animatedCurrent = useCountUp(data?.current ?? 0);
   const animatedLongest = useCountUp(data?.longest ?? 0);
   const animatedActiveDays = useCountUp(data?.totalActiveDays ?? 0);
+
+  const handleDownload = useCallback(async () => {
+    if (!containerRef.current) return;
+    try {
+      setIsDownloading(true);
+      const dataUrl = await toPng(containerRef.current, {
+        cacheBust: true,
+        style: { margin: "0" },
+      });
+      const link = document.createElement("a");
+      link.download = "devtrack-streak.png";
+      link.href = dataUrl;
+      link.click();
+    } catch (err) {
+      console.error("Failed to generate image", err);
+    } finally {
+      setIsDownloading(false);
+    }
+  }, []);
 
   const fetchStreak = useCallback(async () => {
     setLoading(true);
@@ -67,7 +101,9 @@ export default function StreakTracker() {
 
       setData(streakData);
       setContributionData(contribData);
-    } catch {
+      setFreezeDates(streakData.freezeDates || []);
+    } catch (err) {
+      console.error("Failed to fetch streak data:", err);
       setError("We couldn't load your streak data right now. Please try again in a moment.");
     } finally {
       setLoading(false);
@@ -81,7 +117,10 @@ export default function StreakTracker() {
     fetch("/api/streak/freeze")
       .then((r) => r.json())
       .then((d: FreezeData) => setFreeze(d))
-      .catch(() => setFreeze(null))
+      .catch((err) => {
+        console.error("Failed to fetch freeze data:", err);
+        setFreeze(null);
+      })
       .finally(() => setFreezeLoading(false));
   };
 
@@ -91,6 +130,37 @@ export default function StreakTracker() {
   }, [fetchStreak]);
 
   useEffect(() => {
+    const handleSync = () => {
+      fetchStreak();
+    };
+    window.addEventListener("devtrack:sync", handleSync);
+    return () => window.removeEventListener("devtrack:sync", handleSync);
+  }, [fetchStreak]);
+
+  useEffect(() => {
+    const stored = localStorage.getItem(
+      "devtrack:dismissed-milestones"
+    );
+
+    const storedLastCelebrated = localStorage.getItem(
+      "devtrack:last-celebrated-milestone"
+    );
+
+    if (stored) {
+      try {
+        setDismissedMilestones(JSON.parse(stored));
+      } catch {
+        // ignore invalid localStorage data
+      }
+    }
+
+    if (storedLastCelebrated) {
+      setLastCelebratedMilestone(
+        Number(storedLastCelebrated)
+      );
+    }
+  }, []);
+  useEffect(() => {
     if (!lastUpdated) return;
     const interval = setInterval(() => {
       const diff = Math.floor((Date.now() - lastUpdated.getTime()) / 60000);
@@ -98,6 +168,36 @@ export default function StreakTracker() {
     }, 60000);
     return () => clearInterval(interval);
   }, [lastUpdated]);
+
+  async function handleApplyFreeze() {
+    setFreezeLoading(true);
+    try {
+      const res = await fetch("/api/streak/freeze", { method: "POST" });
+      if (!res.ok) throw new Error("Failed to apply freeze");
+
+      const streakUrl =
+        selectedAccount !== null
+          ? `/api/metrics/streak?accountId=${encodeURIComponent(selectedAccount)}`
+          : "/api/metrics/streak";
+      const [streakRes, freezeRes] = await Promise.all([
+        fetch(streakUrl),
+        fetch("/api/streak/freeze"),
+      ]);
+      const [streakData, freezeData] = await Promise.all([
+        streakRes.json() as Promise<StreakData>,
+        freezeRes.json() as Promise<FreezeData>,
+      ]);
+      setData(streakData);
+      setFreeze(freezeData);
+      toast.success("Streak freeze activated for today!");
+    } catch (err) {
+      console.error("Failed to apply streak freeze:", err);
+      toast.error("Failed to activate streak freeze.");
+      fetchFreeze();
+    } finally {
+      setFreezeLoading(false);
+    }
+  }
 
   async function handleCancelFreeze() {
     if (!confirmCancel) {
@@ -126,7 +226,9 @@ export default function StreakTracker() {
       ]);
       setData(streakData);
       setFreeze(freezeData);
-    } catch {
+    } catch (err) {
+      console.error("Failed to cancel streak freeze:", err);
+      toast.error("Failed to cancel streak freeze.");
       fetchFreeze();
     } finally {
       setCancelling(false);
@@ -136,11 +238,17 @@ export default function StreakTracker() {
   if (loading) {
     return (
       <div className="bg-[var(--card)] rounded-xl p-6">
-        <div className="h-6 w-36 bg-[var(--card-muted)] rounded animate-pulse mb-4" />
-        <div className="grid grid-cols-2 gap-4">
-          {[1, 2, 3, 4].map((i) => (
-            <div key={i} className="bg-[var(--card-muted)] rounded-lg h-28 animate-pulse" />
-          ))}
+        <div role="status" aria-live="polite" aria-busy="true">
+          <span className="sr-only">Loading streak tracker</span>
+          <div
+            aria-hidden="true"
+            className="h-6 w-36 bg-[var(--card-muted)] rounded animate-pulse mb-4"
+          />
+          <div aria-hidden="true" className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {[1, 2, 3, 4].map((i) => (
+              <div key={i} className="bg-[var(--card-muted)] rounded-lg h-28 animate-pulse" />
+            ))}
+          </div>
         </div>
       </div>
     );
@@ -149,13 +257,13 @@ export default function StreakTracker() {
   if (error) {
     return (
       <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-6 shadow-sm">
-        <h2 className="mb-4 text-lg font-semibold text-[var(--card-foreground)]">Commit Streaks</h2>
-        <div className="rounded-lg border border-red-500/20 bg-red-500/10 p-4 text-sm text-red-400">
+        <SectionHeader title="Commit Streaks" />
+        <div className="rounded-lg border border-[var(--destructive)]/20 bg-[var(--destructive)]/10 p-4 text-sm text-[var(--destructive)]">
           <p>{error}</p>
           <button
             type="button"
             onClick={fetchStreak}
-            className="mt-3 rounded-md border border-red-500/30 px-3 py-1.5 text-xs font-medium text-red-300 transition-colors hover:bg-red-500/10"
+            className="mt-3 rounded-md border border-[var(--destructive)]/30 px-3 py-1.5 text-xs font-medium text-[var(--destructive)] transition-colors hover:bg-[var(--destructive)]/10"
           >
             Try again
           </button>
@@ -163,16 +271,46 @@ export default function StreakTracker() {
       </div>
     );
   }
+    if (
+    !contributionData ||
+    !contributionData.data ||
+    Object.keys(contributionData.data).length === 0
+  ) {
+    return (
+      <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-6 shadow-sm min-h-[420px]">
+        <div className="flex h-full flex-col items-center justify-center text-center">
+          <div className="mb-4 text-4xl">📉</div>
 
+          <SectionHeader title="No contribution data found" />
+            
+          
+
+          <p className="mt-2 max-w-sm text-sm text-[var(--muted-foreground)]">
+            Start committing to build your streak and track your coding activity.
+          </p>
+
+          <a
+            href="https://github.com"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="mt-4 rounded-md bg-[var(--accent)] px-4 py-2 text-sm font-medium text-[var(--accent-foreground)] transition-opacity hover:opacity-90"
+          >
+            Open GitHub
+          </a>
+        </div>
+      </div>
+    );
+  }
   const MILESTONES = [
-    { days: 30, label: "30-day streak!", emoji: "🏅" },
-    { days: 14, label: "2-week streak!", emoji: "⭐" },
-    { days: 7, label: "7-day streak!", emoji: "🔥" },
-    { days: 3, label: "3-day streak!", emoji: "✨" },
+    { days: 30, label: "30-day streak!", icon: Medal },
+    { days: 14, label: "2-week streak!", icon: Star },
+    { days: 7, label: "7-day streak!", icon: Flame },
+    { days: 3, label: "3-day streak!", icon: Sparkles },
   ];
 
   const badge = MILESTONES.find((m) => (data?.current ?? 0) >= m.days);
   const activeDayData = calculateActiveDayInsights(contributionData?.data);
+  const monthlyTrend = calculateMonthlyTrend(contributionData);
 
   const stats = data
     ? [
@@ -181,7 +319,7 @@ export default function StreakTracker() {
           value: animatedCurrent,
           unit: "days",
           highlight: data.current > 0,
-          icon: "🔥",
+          icon: Flame,
           tooltip: "Current consecutive coding days",
         },
         {
@@ -189,7 +327,7 @@ export default function StreakTracker() {
           value: animatedLongest,
           unit: "days",
           highlight: false,
-          icon: "🏆",
+          icon: Trophy,
           tooltip: "Your longest streak ever",
         },
         {
@@ -197,7 +335,7 @@ export default function StreakTracker() {
           value: animatedActiveDays,
           unit: "days",
           highlight: false,
-          icon: "📅",
+          icon: Calendar,
           tooltip: "Days you made commits in the last 90 days",
         },
         {
@@ -210,53 +348,121 @@ export default function StreakTracker() {
             : "—",
           unit: "",
           highlight: false,
-          icon: "⚡",
+          icon: Zap,
           tooltip: "Your most recent commit",
         },
       ]
     : [];
 
-  const handleCopy = () => {
+    const handleCopy = async () => {
     if (!data) return;
+
     const textToCopy = [
       "🔥 DevTrack Stats",
       `Current streak: ${data.current} days`,
       `Longest streak: ${data.longest} days`,
-      `Active days: ${data.totalActiveDays}`
-    ].join('\n');
+      `Active days: ${data.totalActiveDays}`,
+    ].join("\n");
 
     if (!navigator.clipboard) {
+      toast.error("Clipboard is not supported in this browser.");
       return;
     }
 
-    navigator.clipboard.writeText(textToCopy).then(() => {
+    try {
+      await navigator.clipboard.writeText(textToCopy);
+
       setCopied(true);
+
+      toast.success("Streak stats copied to clipboard!");
+
       setTimeout(() => setCopied(false), 2000);
-    }).catch(() => {});
+    } catch (err) {
+      console.error("Failed to copy streak stats:", err);
+      toast.error("Failed to copy streak stats.");
+    }
+  };
+
+  const currentMilestone = 
+    [...STREAK_MILESTONES]
+      .reverse()
+      .find(
+        (m) =>
+          data?.current &&
+          data.current >= m &&
+          m > lastCelebratedMilestone
+      );
+  const shouldShowBanner = 
+    currentMilestone &&
+    !dismissedMilestones.includes(currentMilestone);
+  const handleDismissBanner = () => {
+    if (!currentMilestone) return;
+
+    const updated = [
+      ...dismissedMilestones,
+      currentMilestone,
+    ];
+
+    setDismissedMilestones(updated);
+
+    setLastCelebratedMilestone(currentMilestone);
+
+    localStorage.setItem(
+      "devtrack:last-celebrated-milestone",
+      String(currentMilestone)
+    );
+
+    localStorage.setItem(
+      "devtrack:dismissed-milestones",
+      JSON.stringify(updated)
+    );
   };
 
   return (
-    <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-6 shadow-sm">
-      <div className="mb-4 flex items-center justify-between">
-        <h2 className="text-lg font-semibold text-[var(--card-foreground)]">
-          Commit Streaks
-        </h2>
+    <>
+      {shouldShowBanner && currentMilestone && (
+        <StreakMilestoneBanner
+          streak={currentMilestone}
+          onDismiss={handleDismissBanner}
+        />
+      )}
+      <div className="relative">
         {data && (
-          <button
-            type="button"
-            onClick={handleCopy}
-            className="cursor-pointer flex h-8 items-center justify-center rounded-md px-2 text-sm text-[var(--muted-foreground)] hover:bg-[var(--control)] hover:text-[var(--card-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)] transition-colors"
-            aria-label="Copy streak stats to clipboard"
-          >
-            {copied ? (
-              <span className="text-xs font-medium text-green-500">Copied!</span>
-            ) : (
-              <span className="text-base opacity-80 hover:opacity-100">📋</span>
-            )}
-          </button>
+          <div className="absolute top-6 right-6 flex items-center gap-2 z-10">
+            <button
+              type="button"
+              onClick={handleCopy}
+              className="cursor-pointer flex h-8 items-center justify-center rounded-md px-2 text-sm text-[var(--muted-foreground)] hover:bg-[var(--control)] hover:text-[var(--card-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)] transition-colors"
+              aria-label="Copy streak stats to clipboard"
+            >
+              {copied ? (
+                <span className="text-xs font-medium text-[var(--success)]">Copied!</span>
+              ) : (
+                <Copy size={16} className="opacity-80 hover:opacity-100" />
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={handleDownload}
+              disabled={isDownloading}
+              className="cursor-pointer flex h-8 items-center justify-center rounded-md px-3 py-1.5 text-xs font-medium bg-[var(--accent)] text-[var(--accent-foreground)] hover:opacity-90 disabled:opacity-70 focus:outline-none focus:ring-2 focus:ring-[var(--accent)] transition-colors gap-1.5 shadow-sm"
+              aria-label="Download streak stats as image"
+            >
+              {isDownloading ? (
+                <span className="w-4 h-4 rounded-full border-2 border-[var(--accent-foreground)]/30 border-t-[var(--accent-foreground)] animate-spin" />
+              ) : (
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+              )}
+              <span>SHARE</span>
+            </button>
+          </div>
         )}
-      </div>
-      <div className="grid grid-cols-2 gap-3">
+        <div ref={containerRef} className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-6 shadow-sm">
+          <div className="mb-4 flex items-center justify-between">
+            <SectionHeader title="Commit Streaks" />
+            {data && <div className="h-8 w-24" />}
+          </div>
+          <div className="grid grid-cols-2 gap-3">
         {stats.map((stat) => (
           <div
             key={stat.label}
@@ -265,8 +471,11 @@ export default function StreakTracker() {
                 ? "border border-[var(--accent)]/40 bg-[var(--accent-soft)]"
                 : "bg-[var(--control)]"
             }`}
+            aria-label={stat.tooltip}
           >
-            <div className="text-xl mb-1" title={stat.tooltip} aria-label={stat.tooltip} role="img">{stat.icon}</div>
+            <div className="flex justify-center mb-1">
+              <stat.icon size={24} className="text-[var(--accent)]" aria-hidden="true" />
+            </div>
             <div
               className={`text-2xl font-bold ${
                 stat.highlight ? "text-[var(--accent)]" : "text-[var(--accent)]"
@@ -279,13 +488,48 @@ export default function StreakTracker() {
                 </span>
               )}
             </div>
-            <div className="mt-1 text-xs text-[var(--muted-foreground)]">{stat.label}</div>
+            <div className="mt-1 flex items-center justify-center gap-1 text-xs text-[var(--muted-foreground)]">
+              <span>{stat.label}</span>
+
+              <button
+                type="button"
+                aria-label={stat.tooltip}
+                className="text-[var(--muted-foreground)] hover:text-[var(--accent)] focus:outline-none"
+              >
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <circle cx="12" cy="12" r="10" />
+                  <line x1="12" y1="16" x2="12" y2="12" />
+                  <line x1="12" y1="8" x2="12.01" y2="8" />
+                </svg>
+              </button>
+            </div>
           </div>
         ))}
       </div>
+      {monthlyTrend.isValid && (
+        <div className="mt-3 flex items-center justify-between rounded-lg border border-[var(--border)] bg-[var(--card)] px-4 py-2.5 text-xs shadow-sm">
+          <span className="text-[var(--muted-foreground)]">
+            This month: <strong className="font-semibold text-[var(--card-foreground)]">{monthlyTrend.thisMonth} active days</strong>
+          </span>
+          <span className={monthlyTrend.colorClass}>
+            ({monthlyTrend.text})
+          </span>
+        </div>
+      )}
       {badge && (
         <div className="mt-3 flex items-center justify-center gap-2 rounded-lg border border-[var(--accent)]/30 bg-[var(--accent)]/10 px-3 py-2">
-          <span>{badge.emoji}</span>
+          <badge.icon size={18} className="text-[var(--accent)]" aria-hidden="true" />
           <span className="text-sm font-medium text-[var(--accent)]">{badge.label}</span>
         </div>
       )}
@@ -343,7 +587,10 @@ export default function StreakTracker() {
 
       {!freezeLoading && freeze?.hasFreeze && (
         <div className="mt-4 flex items-center justify-between rounded-lg border border-[var(--accent)]/30 bg-[var(--accent-soft)] px-4 py-3">
-          <span className="text-sm font-medium text-[var(--accent)]">✓ Freeze active today</span>
+          <div className="flex items-center gap-2">
+            <CheckCircle size={18} className="text-[var(--accent)]" aria-hidden="true" />
+            <span className="text-sm font-medium text-[var(--accent)]">Freeze active today</span>
+          </div>
           {confirmCancel ? (
             <div className="flex items-center gap-2">
               <span className="text-xs text-[var(--muted-foreground)]">Remove freeze?</span>
@@ -351,7 +598,7 @@ export default function StreakTracker() {
                 type="button"
                 onClick={handleCancelFreeze}
                 disabled={cancelling}
-                className="rounded-md bg-red-500/10 px-2.5 py-1 text-xs font-medium text-red-400 transition hover:bg-red-500/20 disabled:opacity-60"
+                className="rounded-md bg-[var(--destructive)]/10 px-2.5 py-1 text-xs font-medium text-[var(--destructive)] transition hover:bg-[var(--destructive)]/20 disabled:opacity-60"
               >
                 {cancelling ? "Removing..." : "Yes, remove"}
               </button>
@@ -376,20 +623,70 @@ export default function StreakTracker() {
         </div>
       )}
 
+      {!freezeLoading && !freeze?.hasFreeze && (
+        <div className="mt-4 flex items-center justify-between rounded-lg border border-[var(--border)] bg-[var(--control)] px-4 py-3">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium text-[var(--foreground)]">Streak Freeze</span>
+            <span className="text-xs text-[var(--muted-foreground)]">❄️ 1 available</span>
+            <div className="group relative cursor-help">
+              <span 
+                className="flex h-5 w-5 items-center justify-center rounded-full bg-[var(--card-muted)] text-[10px] font-bold text-[var(--muted-foreground)] hover:bg-[var(--accent-soft)] hover:text-[var(--accent)] transition-colors"
+                role="img"
+                aria-label="A streak freeze protects your streak for one missed day. You can only use one freeze at a time."
+              >
+                ?
+              </span>
+              <div className="absolute bottom-full left-1/2 mb-2 -translate-x-1/2 w-64 rounded-lg bg-[var(--foreground)] px-3 py-2 text-xs font-medium leading-relaxed text-[var(--background)] opacity-0 pointer-events-none group-hover:opacity-100 transition-opacity z-20 shadow-lg text-center">
+                A streak freeze protects your streak for one missed day. You can only use one freeze at a time.
+                <div className="absolute top-full left-1/2 h-1 w-1 -translate-x-1/2 border-4 border-t-[var(--foreground)] border-transparent" />
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleApplyFreeze}
+            disabled={freezeLoading || freeze?.hasFreeze}
+            className={`rounded-md px-3 py-1 text-xs font-medium transition ${
+              freezeLoading || freeze?.hasFreeze
+                ? "cursor-not-allowed opacity-50 bg-[var(--accent)]"
+                : "bg-[var(--accent)] hover:opacity-90"
+            } text-[var(--accent-foreground)]`}
+          >
+            {freeze?.hasFreeze ? "Freeze Active" : "Freeze Streak"}
+          </button>
+        </div>    
+      )}
+
       {/* Streak Calendar Section */}
       {contributionData ? (
-        <StreakCalendar
-          contributions={contributionData.data}
-          currentMonth={calendarMonth}
-          onMonthChange={setCalendarMonth}
-        />
+        <>
+          {/*
+            Freeze dates are managed via the streak freeze API (/api/streak/freeze).
+            Users can activate a freeze from the freeze button in this component.
+            The calendar displays existing freeze dates from the API response.
+            Future: add UI to manually mark/unmark past dates as frozen.
+          */}
+          <StreakCalendar
+            contributions={contributionData.data}
+            freezeDates={
+              freeze?.freezeDate
+                ? Array.from(new Set([...freezeDates, freeze.freezeDate]))
+                : freezeDates
+            }
+            currentMonth={calendarMonth}
+            onMonthChange={setCalendarMonth}
+          />
+        </>
       ) : null}
+      </div>
     </div>
+    </>
   );
 }
 
 interface StreakCalendarProps {
   contributions: Record<string, number>;
+  freezeDates: string[];
   currentMonth: Date;
   onMonthChange: (date: Date) => void;
 }
@@ -398,7 +695,12 @@ function toLocalDateStr(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-function StreakCalendar({ contributions, currentMonth, onMonthChange }: StreakCalendarProps) {
+function StreakCalendar({
+  contributions,
+  freezeDates,
+  currentMonth,
+  onMonthChange,
+}: StreakCalendarProps) {
   const today = new Date();
   const year = currentMonth.getFullYear();
   const month = currentMonth.getMonth();
@@ -408,6 +710,7 @@ function StreakCalendar({ contributions, currentMonth, onMonthChange }: StreakCa
   const daysInMonth = lastDay.getDate();
   const startingDayOfWeek = firstDay.getDay();
 
+  const { getCalendarStyle, themeConfig } = useHeatmapTheme();
   const monthName = firstDay.toLocaleDateString("en-US", { month: "long", year: "numeric" });
   const dayLabels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
@@ -426,38 +729,47 @@ function StreakCalendar({ contributions, currentMonth, onMonthChange }: StreakCa
 
   const handlePrevMonth = () => onMonthChange(new Date(year, month - 1));
   const handleNextMonth = () => onMonthChange(new Date(year, month + 1));
+  const freezeSet = new Set(freezeDates);
 
   return (
     <div className="mt-6 pt-6 border-t border-[var(--border)]">
-      <div className="mb-4 flex items-center justify-between">
-        <h3 className="text-sm font-semibold text-[var(--card-foreground)]">{monthName}</h3>
+      {/* Calendar Header */}
+      <div className="mb-6 flex items-center justify-between">
+        <h3 className="text-lg font-semibold text-[var(--card-foreground)]">
+          {monthName}
+        </h3>
         <div className="flex gap-2">
           <button
             onClick={handlePrevMonth}
-            className="rounded-md p-1 hover:bg-[var(--control)] transition-colors"
+            className="rounded-md px-2 py-1 hover:bg-[var(--control)] transition-colors text-sm font-medium"
             aria-label="Previous month"
           >
-            ←
+            ← Prev
           </button>
           <button
             onClick={handleNextMonth}
-            className="rounded-md p-1 hover:bg-[var(--control)] transition-colors"
+            className="rounded-md px-2 py-1 hover:bg-[var(--control)] transition-colors text-sm font-medium"
             aria-label="Next month"
           >
-            →
+            Next →
           </button>
         </div>
       </div>
 
-      <div className="mb-2 grid grid-cols-7 gap-1">
+      {/* Day labels */}
+      <div className="mb-3 grid grid-cols-7 gap-1">
         {dayLabels.map((label) => (
-          <div key={label} className="text-center text-xs font-medium text-[var(--muted-foreground)]">
+          <div
+            key={label}
+            className="text-center text-xs font-semibold text-[var(--muted-foreground)] uppercase tracking-wider"
+          >
             {label}
           </div>
         ))}
       </div>
 
-      <div className="grid grid-cols-7 gap-1">
+      {/* Calendar grid */}
+      <div className="grid grid-cols-7 gap-2">
         {calendarDays.map((dayData, idx) => {
           if (!dayData.date) {
             return <div key={`empty-${idx}`} className="aspect-square" />;
@@ -467,43 +779,58 @@ function StreakCalendar({ contributions, currentMonth, onMonthChange }: StreakCa
           const commitCount = contributions[dateStr] ?? 0;
           const isFuture = dayData.date > today;
           const isToday = dayData.date.toDateString() === today.toDateString();
+          const isFrozen = freezeSet.has(dateStr) && commitCount === 0;
 
-          let bgColor = "bg-white dark:bg-transparent";
+          let bgColor = "bg-transparent";
           let borderColor = "border border-[var(--border)]";
+          let statusText = "";
 
           if (!isFuture) {
-            if (commitCount > 0) {
-              bgColor = "bg-green-500";
-              borderColor = "border border-green-600";
+            if (isFrozen) {
+              bgColor = "bg-[var(--accent)]/20";
+              borderColor = "border border-[var(--accent)]/40";
+              statusText = "Frozen";
+            } else if (commitCount > 0) {
+              bgColor = "bg-[var(--accent)]";
+              borderColor = "border border-[var(--accent)]";
+              statusText = "Committed";
             } else {
-              bgColor = "bg-gray-500";
-              borderColor = "border border-gray-600";
+              bgColor = "bg-[var(--muted-foreground)]/20";
+              borderColor = "border border-[var(--muted-foreground)]/30";
+              statusText = "Missed";
             }
           }
+
+          const cellStyle = isFuture
+            ? { backgroundColor: "transparent", borderColor: themeConfig.border }
+            : isFrozen
+            ? undefined
+            : getCalendarStyle(commitCount);
 
           const tooltipText = !isFuture
             ? `${dayData.date.toLocaleDateString("en-US", {
                 weekday: "short",
                 month: "short",
                 day: "numeric",
-              })}: ${commitCount > 0 ? "Committed" : "Missed"}`
+              })}: ${statusText}${!isFrozen && commitCount > 0 ? ` (${commitCount})` : ""}`
             : "";
 
           return (
             <div
               key={dateStr}
-              className={`group relative aspect-square rounded-md ${bgColor} ${borderColor} transition-transform hover:scale-110 cursor-default ${
-                isToday ? "ring-2 ring-[var(--accent)]" : ""
+              className={`group relative aspect-square rounded-lg ${bgColor} ${borderColor} transition-all hover:scale-110 hover:shadow-lg cursor-default ${
+                isToday ? "ring-2 ring-offset-1 ring-[var(--accent)]" : ""
               }`}
+              style={cellStyle}
               title={tooltipText}
             >
               {!isFuture && (
-                <span className="absolute inset-0 flex items-center justify-center text-xs font-medium text-white dark:text-gray-900 opacity-0 group-hover:opacity-100 transition-opacity">
+                <span className="absolute inset-0 flex items-center justify-center text-xs font-bold text-[var(--accent-foreground)] opacity-0 group-hover:opacity-100 transition-opacity">
                   {dayData.dayOfMonth}
                 </span>
               )}
               {!isFuture && tooltipText && (
-                <div className="absolute bottom-full left-1/2 mb-2 -translate-x-1/2 whitespace-nowrap rounded-md bg-[var(--foreground)] px-2 py-1 text-xs text-[var(--background)] opacity-0 pointer-events-none group-hover:opacity-100 transition-opacity z-10">
+                <div className="absolute bottom-full left-1/2 mb-2 -translate-x-1/2 whitespace-nowrap rounded-lg bg-[var(--foreground)] px-3 py-2 text-xs font-medium text-[var(--background)] opacity-0 pointer-events-none group-hover:opacity-100 transition-opacity z-10 shadow-lg">
                   {tooltipText}
                   <div className="absolute top-full left-1/2 h-1 w-1 -translate-x-1/2 border-4 border-t-[var(--foreground)] border-transparent" />
                 </div>
@@ -513,20 +840,28 @@ function StreakCalendar({ contributions, currentMonth, onMonthChange }: StreakCa
         })}
       </div>
 
-      <div className="mt-4 flex flex-wrap gap-4 text-xs text-[var(--muted-foreground)]">
-        <div className="flex items-center gap-2">
-          <div className="h-3 w-3 rounded bg-green-500" />
-          <span>Committed</span>
+      {/* Legend */}
+      <div className="mt-6 flex flex-wrap gap-6 text-sm">
+        <div className="flex items-center gap-3">
+          <div className="h-4 w-4 rounded-md bg-[var(--accent)]" />
+          <span className="text-[var(--card-foreground)] font-medium">Committed</span>
         </div>
-        <div className="flex items-center gap-2">
-          <div className="h-3 w-3 rounded bg-gray-500" />
-          <span>Missed</span>
+        <div className="flex items-center gap-3">
+          <div className="h-4 w-4 rounded-md border border-[var(--accent)]/40 bg-[var(--accent)]/20" />
+          <span className="text-[var(--card-foreground)] font-medium">Frozen</span>
         </div>
-        <div className="flex items-center gap-2">
-          <div className="h-3 w-3 rounded border border-[var(--border)]" />
-          <span>Future</span>
+        <div className="flex items-center gap-3">
+          <div className="h-4 w-4 rounded-md border border-[var(--muted-foreground)]/30 bg-[var(--muted-foreground)]/20" />
+          <span className="text-[var(--card-foreground)] font-medium">Missed</span>
+        </div>
+        <div className="flex items-center gap-3">
+          <div className="h-4 w-4 rounded-md border-2 border-[var(--border)]" />
+          <span className="text-[var(--card-foreground)] font-medium">Future</span>
         </div>
       </div>
+      <p className="mt-2 text-xs text-[var(--muted-foreground)]">
+        Frozen days are set via the streak freeze feature above.
+      </p>
     </div>
   );
 }
@@ -592,4 +927,75 @@ function calculateActiveDayInsights(data: Record<string, number> | undefined | n
   const peakDay = tiedDays.length > 0 ? tiedDays[0] : null;
 
   return { insights, peakDay, isValid: true };
+}
+
+interface MonthlyTrendResult {
+  isValid: boolean;
+  thisMonth: number;
+  lastMonth: number;
+  text: string;
+  colorClass: string;
+}
+
+function calculateMonthlyTrend(contrib: ContributionData | undefined | null): MonthlyTrendResult {
+  if (!contrib || !contrib.data) {
+    return { isValid: false, thisMonth: 0, lastMonth: 0, text: "", colorClass: "" };
+  }
+
+  if (contrib.days < 30) {
+    return { isValid: false, thisMonth: 0, lastMonth: 0, text: "", colorClass: "" };
+  }
+
+  const data = contrib.data;
+
+  const now = new Date();
+  const currentYear = now.getFullYear();
+  const currentMonth = now.getMonth();
+
+  const prevDate = new Date(currentYear, currentMonth - 1, 1);
+  const prevYear = prevDate.getFullYear();
+  const prevMonth = prevDate.getMonth();
+
+  let thisMonth = 0;
+  let lastMonth = 0;
+
+  for (const [dateStr, count] of Object.entries(data)) {
+    if (count > 0) {
+      const parts = dateStr.split("-").map(Number);
+      if (parts.length === 3 && !isNaN(parts[0]) && !isNaN(parts[1]) && !isNaN(parts[2])) {
+        const d = new Date(parts[0], parts[1] - 1, parts[2]);
+        if (!isNaN(d.getTime())) {
+          if (d.getFullYear() === currentYear && d.getMonth() === currentMonth) {
+            thisMonth++;
+          } else if (d.getFullYear() === prevYear && d.getMonth() === prevMonth) {
+            lastMonth++;
+          }
+        }
+      }
+    }
+  }
+
+  let text = "";
+  let colorClass = "";
+
+  if (lastMonth === 0) {
+    text = "First month tracked!";
+    colorClass = "text-[var(--accent)] font-medium";
+  } else {
+    const deltaCalc = ((thisMonth - lastMonth) / lastMonth) * 100;
+    const formatted = deltaCalc.toFixed(0);
+
+    if (deltaCalc > 0) {
+      text = `↑${formatted}% vs last month`;
+      colorClass = "text-[var(--success)] font-medium";
+    } else if (deltaCalc < 0) {
+      text = `↓${Math.abs(deltaCalc).toFixed(0)}% vs last month`;
+      colorClass = "text-[var(--destructive)] font-medium";
+    } else {
+      text = `=0% vs last month`;
+      colorClass = "text-[var(--muted-foreground)] font-medium";
+    }
+  }
+
+  return { isValid: true, thisMonth, lastMonth, text, colorClass };
 }

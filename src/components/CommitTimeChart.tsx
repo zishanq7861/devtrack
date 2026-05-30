@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   BarChart,
   Bar,
@@ -10,6 +10,8 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from "recharts";
+import { Sun, Cloud, Sunset, Moon } from "lucide-react";
+import { toast } from "sonner";
   
 interface TimeBlocks {
   morning: number;
@@ -18,16 +20,21 @@ interface TimeBlocks {
   night: number;
 }
 
+interface ChartData {
+  name: string;
+  commits: number;
+  icon: React.ComponentType<any>;
+  key: string;
+}
+
 export default function CommitTimeChart() {
-  const [data, setData] = useState<
-    { name: string; commits: number; icon: string }[]
-  >([]);
+  const [data, setData] = useState<ChartData[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [days, setDays] = useState(30);
   const [peakTime, setPeakTime] = useState<string | null>(null);
 
-  const fetchContributions = () => {
+  const fetchContributions = useCallback(() => {
     setLoading(true);
     setError(null);
     fetch(`/api/metrics/contributions?days=${days}`)
@@ -40,29 +47,29 @@ export default function CommitTimeChart() {
         }
 
         const blocks = res.timeBlocks;
-        const chartData = [
+        const chartData: ChartData[] = [
           {
             name: "Morning (6-12)",
             commits: blocks.morning,
-            icon: "Sun",
+            icon: Sun,
             key: "morning",
           },
           {
             name: "Afternoon (12-18)",
             commits: blocks.afternoon,
-            icon: "CloudSun",
+            icon: Cloud,
             key: "afternoon",
           },
           {
             name: "Evening (18-22)",
             commits: blocks.evening,
-            icon: "Sunset",
+            icon: Sunset,
             key: "evening",
           },
           {
             name: "Night (22-6)",
             commits: blocks.night,
-            icon: "Moon",
+            icon: Moon,
             key: "night",
           },
         ];
@@ -77,15 +84,17 @@ export default function CommitTimeChart() {
         setData(chartData);
         setPeakTime(peak.commits > 0 ? peak.name : null);
       })
-      .catch(() =>
-        setError("We couldn't load your time-of-day data right now."),
-      )
+      .catch((err) => {
+        console.error("Failed to fetch commit time data:", err);
+        setError("We couldn't load your time-of-day data right now.");
+        toast.error("Failed to load time-of-day data");
+      })
       .finally(() => setLoading(false));
-  };
+  }, [days]);
 
   useEffect(() => {
     fetchContributions();
-  }, [days]);
+  }, [fetchContributions]);
 
   return (
     <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-6 shadow-sm flex flex-col h-full">
@@ -111,22 +120,29 @@ export default function CommitTimeChart() {
 
       <div className="flex-1 min-h-[250px]">
         {loading ? (
-          <div className="flex h-full flex-col justify-end space-y-3 pt-6 pb-2">
+          <div
+            role="status"
+            aria-live="polite"
+            aria-busy="true"
+            className="flex h-full flex-col justify-end space-y-3 pt-6 pb-2"
+          >
+            <span className="sr-only">Loading commit time chart</span>
             {[1, 2, 3, 4].map((i) => (
               <div
                 key={i}
+                aria-hidden="true"
                 className="h-10 rounded bg-[var(--card-muted)] animate-pulse"
               />
             ))}
           </div>
         ) : error ? (
           <div className="flex h-full items-center justify-center">
-            <div className="rounded-lg border border-red-500/20 bg-red-500/10 p-4 text-sm text-red-400 text-center">
+            <div className="rounded-lg border border-[var(--destructive)]/20 bg-[var(--destructive)]/10 p-4 text-sm text-[var(--destructive)] text-center">
               <p>{error}</p>
               <button
                 type="button"
                 onClick={fetchContributions}
-                className="mt-3 rounded-md border border-red-500/30 px-3 py-1.5 text-xs font-medium text-red-300 transition-colors hover:bg-red-500/10"
+                className="mt-3 rounded-md border border-[var(--destructive)]/30 px-3 py-1.5 text-xs font-medium text-[var(--destructive)] transition-colors hover:bg-[var(--destructive)]/10"
               >
                 Try again
               </button>

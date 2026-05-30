@@ -1,182 +1,266 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { useAccount } from "@/components/AccountContext";
 
 interface WeeklySummaryData {
-  commits: { current: number | null; last: number | null; delta: number | null };
-  pullRequests: { opened: number | null; merged: number | null };
-  activeDays: number | null;
-  streak: number | null;
-  mostActiveRepo: string | null;
-  weekStart: string;
-  generatedAt: string;
-}
-
-function DeltaBadge({ delta }: { delta: number | null }) {
-  if (delta === null) {
-    return (
-      <span className="text-sm font-medium text-[var(--muted-foreground)]">
-        —
-      </span>
-    );
-  }
-
-  if (delta > 0) {
-    return <span className="text-sm font-medium text-green-500">↑ {delta}</span>;
-  }
-
-  if (delta < 0) {
-    return (
-      <span className="text-sm font-medium text-red-400">
-        ↓ {Math.abs(delta)}
-      </span>
-    );
-  }
-
-  return (
-    <span className="text-sm font-medium text-[var(--muted-foreground)]">
-      0
-    </span>
-  );
-}
-
-function formatRepoName(repo: string | null): string {
-  if (!repo) return "—";
-  return repo.split("/")[1] ?? repo;
+  commits: {
+    current: number;
+    previous: number;
+    delta: number;
+    trend: "up" | "down" | "same";
+  };
+  prs: {
+    thisWeek: { opened: number; merged: number };
+    lastWeek: { opened: number; merged: number };
+  };
+  activeDays: { thisWeek: number; lastWeek: number };
+  streak: number;
+  topRepo: string | null;
 }
 
 export default function WeeklySummaryCard() {
-  const [data, setData] = useState<WeeklySummaryData | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState(false);
+  const { selectedAccount } = useAccount();
+  const [summary, setSummary] = useState<WeeklySummaryData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [isCollapsed, setIsCollapsed] = useState(false);
-  const [isHydrated, setIsHydrated] = useState(false);
+
+  const maxCommits = summary?.commits ? Math.max(summary.commits.current, summary.commits.previous, 1) : 1;
+  const maxPRs = summary?.prs ? Math.max(summary.prs.thisWeek.merged, summary.prs.lastWeek.merged, 1) : 1;
+  const maxActiveDays = summary?.activeDays ? Math.max(summary.activeDays.thisWeek, summary.activeDays.lastWeek, 1) : 1;
+
+  const fetchSummary = useCallback(() => {
+    setLoading(true);
+    setError(null);
+
+    const url = selectedAccount !== null
+      ? `/api/metrics/weekly-summary?accountId=${encodeURIComponent(selectedAccount)}`
+      : "/api/metrics/weekly-summary";
+
+    fetch(url)
+      .then((r) => {
+        if (!r.ok) throw new Error("API error");
+        return r.json();
+      })
+      .then((data: WeeklySummaryData) => setSummary(data))
+      .catch(() =>
+        setError(
+          "We couldn't load your weekly summary right now. Please try again in a moment."
+        )
+      )
+      .finally(() => setLoading(false));
+  }, [selectedAccount]);
 
   useEffect(() => {
-    const stored = window.localStorage.getItem("weekly-summary-collapsed");
-    if (stored !== null) {
-      setIsCollapsed(stored === "true");
-    }
-    setIsHydrated(true);
-  }, []);
-
-  useEffect(() => {
-    fetch("/api/metrics/weekly-summary")
-      .then((response) => {
-        if (!response.ok) {
-          throw new Error("Failed to fetch weekly summary");
-        }
-
-        return response.json();
-      })
-      .then((summary: WeeklySummaryData) => {
-        setData(summary);
-        setError(false);
-      })
-      .catch(() => {
-        setError(true);
-      })
-      .finally(() => {
-        setIsLoading(false);
-      });
-  }, []);
-
-  const toggleCollapsed = () => {
-    const nextValue = !isCollapsed;
-    setIsCollapsed(nextValue);
-    window.localStorage.setItem(
-      "weekly-summary-collapsed",
-      String(nextValue)
-    );
-  };
-
-  const showCollapsed = isHydrated && !isLoading && isCollapsed;
+    fetchSummary();
+  }, [fetchSummary]);
 
   return (
-    <div className="mb-6 rounded-xl border border-[var(--border)] bg-[var(--card)] p-6 shadow-sm">
-      <button
-        type="button"
-        onClick={toggleCollapsed}
-        className="flex w-full items-center justify-between text-left"
-        aria-expanded={!showCollapsed}
-        aria-label="Toggle weekly summary"
-      >
-        <div className="flex items-center gap-2">
-          <span className="text-lg" role="img" aria-label="Calendar">
-            📅
-          </span>
-          <h2 className="text-lg font-semibold text-[var(--card-foreground)]">
-            This Week
-          </h2>
-        </div>
-        <span className="text-sm text-[var(--muted-foreground)]">
-          {showCollapsed ? "v" : "^"}
-        </span>
-      </button>
+    <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-6 shadow-sm">
+      <div className="flex items-center justify-between">
+        <h2 className="text-lg font-semibold text-[var(--card-foreground)]">
+          This Week
+        </h2>
+        <button
+          type="button"
+          onClick={() => setIsCollapsed((value) => !value)}
+          className="text-sm text-[var(--muted-foreground)] transition-colors hover:text-[var(--card-foreground)]"
+          aria-expanded={!isCollapsed}
+          aria-label={
+            isCollapsed ? "Expand weekly summary" : "Collapse weekly summary"
+          }
+          suppressHydrationWarning
+        >
+          {isCollapsed ? ">" : "v"}
+        </button>
+      </div>
 
-      {showCollapsed ? null : isLoading ? (
-        <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3">
-          {Array.from({ length: 6 }).map((_, index) => (
-            <div
-              key={index}
-              className="rounded-lg bg-[var(--control)] p-4 text-center"
-            >
-              <div className="mx-auto mb-3 h-4 w-20 rounded bg-[var(--card-muted)] animate-pulse" />
-              <div className="mx-auto h-8 w-24 rounded bg-[var(--card-muted)] animate-pulse" />
+      {!isCollapsed &&
+        (loading ? (
+          <div
+            role="status"
+            aria-live="polite"
+            aria-busy="true"
+            className="mt-4 space-y-3"
+          >
+            <span className="sr-only">Loading weekly summary</span>
+            {[1, 2, 3, 4, 5].map((i) => (
+              <div
+                key={i}
+                aria-hidden="true"
+                className="h-14 rounded-lg bg-[var(--card-muted)] animate-pulse"
+              />
+            ))}
+          </div>
+        ) : error ? (
+          <div className="mt-4 rounded-lg border border-[var(--destructive)]/20 bg-[var(--destructive)]/10 p-4 text-sm text-[var(--destructive)]">
+            {error}
+          </div>
+        ) : summary && summary.commits && summary.prs && summary.activeDays ? (
+          <div className="mt-4 space-y-4">
+            {/* Commits Comparison */}
+            <div className="rounded-lg bg-[var(--control)] p-4">
+              <div className="mb-3 flex items-center justify-between">
+                <span className="text-sm text-[var(--muted-foreground)]">
+                  Commits
+                </span>
+                <span className="text-base font-semibold text-[var(--card-foreground)]">
+                  {summary.commits.current}
+                  {summary.commits.trend !== "same" && (
+                    <span
+                      className="ml-2 text-sm font-medium"
+                      style={{
+                        color: summary.commits.trend === "up" ? "var(--success)" : "var(--destructive)",
+                      }}
+                    >
+                      {summary.commits.trend === "up" ? "+" : "-"}
+                      {Math.abs(summary.commits.delta)}
+                    </span>
+                  )}
+                </span>
+              </div>
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-2">
+                  <span className="w-16 text-xs text-[var(--muted-foreground)]">Last week</span>
+                  <div className="flex-1">
+                    <div className="h-2 rounded bg-[var(--border)] overflow-hidden">
+                      <div
+                        className="h-full bg-[var(--muted-foreground)]"
+                        style={{
+                          width: `${((summary.commits.previous / maxCommits) * 100).toFixed(0)}%`,
+                        }}
+                      />
+                    </div>
+                  </div>
+                  <span className="w-10 text-right text-xs font-medium text-[var(--card-foreground)]">
+                    {((summary.commits.previous / (summary.commits.current + summary.commits.previous || 1)) * 100).toFixed(0)}%
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="w-16 text-xs text-[var(--muted-foreground)]">This week</span>
+                  <div className="flex-1">
+                    <div className="h-2 rounded bg-[var(--border)] overflow-hidden">
+                      <div
+                        className="h-full bg-[var(--success)]"
+                        style={{
+                          width: `${((summary.commits.current / maxCommits) * 100).toFixed(0)}%`,
+                        }}
+                      />
+                    </div>
+                  </div>
+                  <span className="w-10 text-right text-xs font-medium text-[var(--card-foreground)]">
+                    {((summary.commits.current / (summary.commits.current + summary.commits.previous || 1)) * 100).toFixed(0)}%
+                  </span>
+                </div>
+              </div>
             </div>
-          ))}
-        </div>
-      ) : error ? (
-        <p className="mt-4 text-sm text-[var(--muted-foreground)]">
-          Unable to load weekly stats
-        </p>
-      ) : (
-        <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3">
-          <div className="rounded-lg bg-[var(--control)] p-4 text-center">
-            <div className="text-sm text-[var(--muted-foreground)]">Commits</div>
-            <div className="mt-2 text-2xl font-bold text-[var(--accent)]">
-              {data?.commits.current ?? "—"}
+
+            {/* PRs Comparison */}
+            <div className="rounded-lg bg-[var(--control)] p-4">
+              <div className="mb-3 flex items-center justify-between">
+                <span className="text-sm text-[var(--muted-foreground)]">PRs Merged</span>
+                <span className="text-base font-semibold text-[var(--card-foreground)]">
+                  {summary.prs.thisWeek.merged}
+                </span>
+              </div>
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-2">
+                  <span className="w-16 text-xs text-[var(--muted-foreground)]">Last week</span>
+                  <div className="flex-1">
+                    <div className="h-2 rounded bg-[var(--border)] overflow-hidden">
+                      <div
+                        className="h-full bg-[var(--muted-foreground)]"
+                        style={{
+                          width: `${((summary.prs.lastWeek.merged / maxPRs) * 100).toFixed(0)}%`,
+                        }}
+                      />
+                    </div>
+                  </div>
+                  <span className="w-10 text-right text-xs font-medium text-[var(--card-foreground)]">
+                    {((summary.prs.lastWeek.merged / (summary.prs.thisWeek.merged + summary.prs.lastWeek.merged || 1)) * 100).toFixed(0)}%
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="w-16 text-xs text-[var(--muted-foreground)]">This week</span>
+                  <div className="flex-1">
+                    <div className="h-2 rounded bg-[var(--border)] overflow-hidden">
+                      <div
+                        className="h-full bg-[var(--success)]"
+                        style={{
+                          width: `${((summary.prs.thisWeek.merged / maxPRs) * 100).toFixed(0)}%`,
+                        }}
+                      />
+                    </div>
+                  </div>
+                  <span className="w-10 text-right text-xs font-medium text-[var(--card-foreground)]">
+                    {((summary.prs.thisWeek.merged / (summary.prs.thisWeek.merged + summary.prs.lastWeek.merged || 1)) * 100).toFixed(0)}%
+                  </span>
+                </div>
+              </div>
             </div>
-            <div className="mt-1">
-              <DeltaBadge delta={data?.commits.delta ?? null} />
+
+            {/* Active Days Comparison */}
+            <div className="rounded-lg bg-[var(--control)] p-4">
+              <div className="mb-3 flex items-center justify-between">
+                <span className="text-sm text-[var(--muted-foreground)]">Active Days</span>
+                <span className="text-base font-semibold text-[var(--card-foreground)]">
+                  {summary.activeDays.thisWeek} / 7
+                </span>
+              </div>
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-2">
+                  <span className="w-16 text-xs text-[var(--muted-foreground)]">Last week</span>
+                  <div className="flex-1">
+                    <div className="h-2 rounded bg-[var(--border)] overflow-hidden">
+                      <div
+                        className="h-full bg-[var(--muted-foreground)]"
+                        style={{
+                          width: `${((summary.activeDays.lastWeek / maxActiveDays) * 100).toFixed(0)}%`,
+                        }}
+                      />
+                    </div>
+                  </div>
+                  <span className="w-10 text-right text-xs font-medium text-[var(--card-foreground)]">
+                    {((summary.activeDays.lastWeek / (summary.activeDays.thisWeek + summary.activeDays.lastWeek || 1)) * 100).toFixed(0)}%
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="w-16 text-xs text-[var(--muted-foreground)]">This week</span>
+                  <div className="flex-1">
+                    <div className="h-2 rounded bg-[var(--border)] overflow-hidden">
+                      <div
+                        className="h-full bg-[var(--success)]"
+                        style={{
+                          width: `${((summary.activeDays.thisWeek / maxActiveDays) * 100).toFixed(0)}%`,
+                        }}
+                      />
+                    </div>
+                  </div>
+                  <span className="w-10 text-right text-xs font-medium text-[var(--card-foreground)]">
+                    {((summary.activeDays.thisWeek / (summary.activeDays.thisWeek + summary.activeDays.lastWeek || 1)) * 100).toFixed(0)}%
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Streak & Top Repo */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between rounded-lg bg-[var(--control)] p-4">
+                <span className="text-sm text-[var(--muted-foreground)]">Streak</span>
+                <span className="text-base font-semibold text-[var(--card-foreground)]">
+                  {summary.streak} day streak
+                </span>
+              </div>
+              <div className="flex items-center justify-between rounded-lg bg-[var(--control)] p-4">
+                <span className="text-sm text-[var(--muted-foreground)]">Top repo</span>
+                <span className="text-base font-semibold text-[var(--card-foreground)]">
+                  {summary.topRepo ?? "-"}
+                </span>
+              </div>
             </div>
           </div>
-          <div className="rounded-lg bg-[var(--control)] p-4 text-center">
-            <div className="text-sm text-[var(--muted-foreground)]">PRs Open</div>
-            <div className="mt-2 text-2xl font-bold text-[var(--accent)]">
-              {data?.pullRequests.opened ?? "—"}
-            </div>
-          </div>
-          <div className="rounded-lg bg-[var(--control)] p-4 text-center">
-            <div className="text-sm text-[var(--muted-foreground)]">PRs Merged</div>
-            <div className="mt-2 text-2xl font-bold text-[var(--accent)]">
-              {data?.pullRequests.merged ?? "—"}
-            </div>
-          </div>
-          <div className="rounded-lg bg-[var(--control)] p-4 text-center">
-            <div className="text-sm text-[var(--muted-foreground)]">Active Days</div>
-            <div className="mt-2 text-2xl font-bold text-[var(--accent)]">
-              {data?.activeDays !== null && data?.activeDays !== undefined
-                ? `${data.activeDays} / 7`
-                : "— / 7"}
-            </div>
-          </div>
-          <div className="rounded-lg bg-[var(--control)] p-4 text-center">
-            <div className="text-sm text-[var(--muted-foreground)]">Streak</div>
-            <div className="mt-2 text-2xl font-bold text-[var(--accent)]">
-              {data?.streak !== null && data?.streak !== undefined
-                ? `${data.streak} days`
-                : "—"}
-            </div>
-          </div>
-          <div className="rounded-lg bg-[var(--control)] p-4 text-center">
-            <div className="text-sm text-[var(--muted-foreground)]">Top Repo</div>
-            <div className="mt-2 truncate text-2xl font-bold text-[var(--accent)]">
-              {formatRepoName(data?.mostActiveRepo ?? null)}
-            </div>
-          </div>
-        </div>
-      )}
+        ) : null)}
     </div>
   );
 }

@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from "recharts";
+import { useAccount } from "@/components/AccountContext";
 
 interface PRBreakdown {
   draft: number;
@@ -11,39 +12,60 @@ interface PRBreakdown {
 }
 
 const SLICES: { key: keyof PRBreakdown; label: string; color: string }[] = [
-  { key: "open",   label: "Open",   color: "#6366f1" },
-  { key: "merged", label: "Merged", color: "#34d399" },
-  { key: "closed", label: "Closed", color: "#fb923c" },
-  { key: "draft",  label: "Draft",  color: "#94a3b8" },
+  { key: "open",   label: "Open",   color: "var(--accent)" },
+  { key: "merged", label: "Merged", color: "var(--success)" },
+  { key: "closed", label: "Closed", color: "var(--warning)" },
+  { key: "draft",  label: "Draft",  color: "var(--muted-foreground)" },
 ];
 
 export default function PRBreakdownChart() {
+  const { selectedAccount } = useAccount();
   const [breakdown, setBreakdown] = useState<PRBreakdown | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const fetchBreakdown = () => {
+  const getCSSVariable = (varName: string): string => {
+    if (typeof window === "undefined") return "#000";
+    return getComputedStyle(document.documentElement)
+      .getPropertyValue(varName)
+      .trim();
+  };
+
+  const fetchBreakdown = useCallback(() => {
     setLoading(true);
     setError(null);
 
-    fetch("/api/metrics/pr-breakdown")
+    const url = selectedAccount !== null
+      ? `/api/metrics/pr-breakdown?accountId=${encodeURIComponent(selectedAccount)}`
+      : "/api/metrics/pr-breakdown";
+
+    fetch(url)
       .then((r) => r.json())
       .then((d: PRBreakdown) => setBreakdown(d))
       .catch(() =>
         setError("We couldn't load your PR breakdown right now. Please try again in a moment.")
       )
       .finally(() => setLoading(false));
-  };
+  }, [selectedAccount]);
 
   useEffect(() => {
     fetchBreakdown();
-  }, []);
+  }, [fetchBreakdown]);
 
   if (loading) {
     return (
       <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-6 shadow-sm">
-        <div className="mb-4 h-5 w-40 rounded bg-[var(--card-muted)] animate-pulse" />
-        <div className="h-[200px] rounded bg-[var(--card-muted)] animate-pulse" />
+        <div role="status" aria-live="polite" aria-busy="true">
+          <span className="sr-only">Loading PR breakdown</span>
+          <div
+            aria-hidden="true"
+            className="mb-4 h-5 w-40 rounded bg-[var(--card-muted)] animate-pulse"
+          />
+          <div
+            aria-hidden="true"
+            className="h-[200px] rounded bg-[var(--card-muted)] animate-pulse"
+          />
+        </div>
       </div>
     );
   }
@@ -52,12 +74,12 @@ export default function PRBreakdownChart() {
     return (
       <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-6 shadow-sm">
         <h2 className="mb-4 text-lg font-semibold text-[var(--card-foreground)]">PR Breakdown</h2>
-        <div className="rounded-lg border border-red-500/20 bg-red-500/10 p-4 text-sm text-red-400">
+        <div className="rounded-lg border border-[var(--destructive)]/20 bg-[var(--destructive)]/10 p-4 text-sm text-[var(--destructive)]">
           <p>{error}</p>
           <button
             type="button"
             onClick={fetchBreakdown}
-            className="mt-3 rounded-md border border-red-500/30 px-3 py-1.5 text-xs font-medium text-red-300 transition-colors hover:bg-red-500/10"
+            className="mt-3 rounded-md border border-[var(--destructive)]/30 px-3 py-1.5 text-xs font-medium text-[var(--destructive)] transition-colors hover:bg-[var(--destructive)]/10"
           >
             Try again
           </button>
@@ -66,9 +88,9 @@ export default function PRBreakdownChart() {
     );
   }
 
-  const total = breakdown ? SLICES.reduce((sum, s) => sum + breakdown[s.key], 0) : 0;
+  const total = breakdown ? SLICES.reduce((sum, s) => sum + (breakdown[s.key] ?? 0), 0) : 0;
   const chartData = breakdown
-    ? SLICES.map((s) => ({ name: s.label, value: breakdown[s.key], color: s.color })).filter(
+    ? SLICES.map((s) => ({ name: s.label, value: breakdown[s.key] ?? 0, color: s.color })).filter(
         (d) => d.value > 0
       )
     : [];
@@ -98,17 +120,19 @@ export default function PRBreakdownChart() {
                 ))}
               </Pie>
               <Tooltip
-                contentStyle={{
-                  background: "var(--tooltip)",
-                  color: "var(--tooltip-foreground)",
-                  border: "1px solid var(--border)",
-                  borderRadius: "8px",
-                  fontSize: "12px",
-                }}
-                formatter={(value: number) => [
-                  `${value} (${Math.round((value / total) * 100)}%)`,
-                ]}
-              />
+  contentStyle={{
+    backgroundColor: getCSSVariable('--card'),
+    border: `1px solid ${getCSSVariable('--border')}`,
+    borderRadius: "10px",
+    color: getCSSVariable('--foreground'),
+  }}
+  itemStyle={{
+    color: getCSSVariable('--foreground'),
+  }}
+  labelStyle={{
+    color: getCSSVariable('--foreground'),
+  }}
+/>
             </PieChart>
           </ResponsiveContainer>
           <div className="mt-3 flex flex-wrap justify-center gap-4">

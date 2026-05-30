@@ -1,18 +1,13 @@
 import { getServerSession } from "next-auth";
 import { NextRequest } from "next/server";
 import { authOptions } from "@/lib/auth";
+import { dateDiffDays, toDateStr } from "@/lib/dateUtils";
+import { normalizeGitHubUsername } from "@/lib/validate-github-username";
+import { supabaseAdmin } from "@/lib/supabase";
 
 export const dynamic = "force-dynamic";
 
 const GITHUB_API = "https://api.github.com";
-
-function dateDiffDays(a: string, b: string): number {
-  return (new Date(b).getTime() - new Date(a).getTime()) / (1000 * 60 * 60 * 24);
-}
-
-function toDateStr(d: Date): string {
-  return d.toISOString().slice(0, 10);
-}
 
 export async function GET(req: NextRequest) {
   const session = await getServerSession(authOptions);
@@ -20,8 +15,13 @@ export async function GET(req: NextRequest) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  let username = req.nextUrl.searchParams.get("username");
-  if (!username) {
+  const usernameParam = req.nextUrl.searchParams.get("username");
+  if (!usernameParam) {
+    return Response.json({ error: "Username required" }, { status: 400 });
+  }
+
+  let username = usernameParam.trim();
+  if (username.length === 0) {
     return Response.json({ error: "Username required" }, { status: 400 });
   }
 
@@ -29,45 +29,78 @@ export async function GET(req: NextRequest) {
     username = session.githubLogin as string;
   }
 
+  const normalizedUsername = normalizeGitHubUsername(username);
+  if (!normalizedUsername) {
+    return Response.json({ error: "Invalid GitHub username" }, { status: 400 });
+  }
+
+  // Check Supabase cache first (keyed by username + UTC date)
+  const today = toDateStr(new Date());
+  const cacheKey = `${normalizedUsername}::${today}`;
+
+  const { data: cached } = await supabaseAdmin
+    .from("comparison_cache")
+    .select("payload")
+    .eq("cache_key", cacheKey)
+    .maybeSingle();
+
+  if (cached?.payload) {
+    return Response.json({ ...cached.payload, fromCache: true });
+  }
+
+  const encodedUsername = encodeURIComponent(normalizedUsername);
+
   // 1. Verify user exists
-  const userRes = await fetch(`${GITHUB_API}/users/${username}`, {
+  const userRes = await fetch(`${GITHUB_API}/users/${encodedUsername}`, {
     headers: { Authorization: `Bearer ${session.accessToken}` },
-    next: { revalidate: 3600 },
+    cache: "no-store",
   });
 
   if (!userRes.ok) {
-    if (userRes.status === 404) return Response.json({ error: "User not found" }, { status: 404 });
-    return Response.json({ error: "GitHub API error or User is private" }, { status: 502 });
+    if (userRes.status === 404)
+      return Response.json({ error: "User not found" }, { status: 404 });
+    return Response.json(
+      { error: "GitHub API error or User is private" },
+      { status: 502 }
+    );
   }
 
   // 2. Commits & Streak (fetch 90 days)
   const since90 = new Date();
   since90.setDate(since90.getDate() - 90);
   const since90Str = since90.toISOString().slice(0, 10);
-  
+
   const since30 = new Date();
   since30.setDate(since30.getDate() - 30);
   const since30Str = since30.toISOString().slice(0, 10);
 
-  const commitsRes = await fetch(
-    `${GITHUB_API}/search/commits?q=author:${username}+author-date:>=${since90Str}&per_page=100&sort=author-date&order=desc`,
-    {
-      headers: {
-        Authorization: `Bearer ${session.accessToken}`,
-        Accept: "application/vnd.github+json",
-      },
-      next: { revalidate: 3600 },
-    }
+  const commitsUrl = new URL(`${GITHUB_API}/search/commits`);
+  commitsUrl.searchParams.set(
+    "q",
+    `author:${normalizedUsername} author-date:>=${since90Str}`
   );
+  commitsUrl.searchParams.set("per_page", "100");
+  commitsUrl.searchParams.set("sort", "author-date");
+  commitsUrl.searchParams.set("order", "desc");
+
+  const commitsRes = await fetch(commitsUrl.toString(), {
+    headers: {
+      Authorization: `Bearer ${session.accessToken}`,
+      Accept: "application/vnd.github+json",
+    },
+    cache: "no-store",
+  });
 
   let streak = 0;
   let commits30d = 0;
   let topLanguage = "Unknown";
-  
+  const weeklyMap: Record<string, number> = {};
+
   if (commitsRes.ok) {
     const commitsData = await commitsRes.json();
-    const items = commitsData.items || [];
-    
+    const items: Array<{ commit: { author: { date: string } } }> =
+      commitsData.items || [];
+
     const daySet: Record<string, true> = {};
     for (const item of items) {
       const dateStr = item.commit.author.date.slice(0, 10);
@@ -75,42 +108,68 @@ export async function GET(req: NextRequest) {
       if (dateStr >= since30Str) {
         commits30d++;
       }
+
+      // Bucket into Mon-anchored week for chart
+      const d = new Date(dateStr);
+      const day = d.getUTCDay();
+      const diff = day === 0 ? -6 : 1 - day;
+      d.setUTCDate(d.getUTCDate() + diff);
+      const weekKey = toDateStr(d);
+      weeklyMap[weekKey] = (weeklyMap[weekKey] ?? 0) + 1;
     }
+
     const commitDays = Object.keys(daySet).sort();
-    
+
     if (commitDays.length > 0) {
       let currentRun = 1;
-      let runs: { end: string; length: number }[] = [];
-      let runStart = commitDays[0];
+      const runs: { end: string; length: number }[] = [];
       for (let i = 1; i < commitDays.length; i++) {
         if (dateDiffDays(commitDays[i - 1], commitDays[i]) === 1) {
           currentRun++;
         } else {
           runs.push({ end: commitDays[i - 1], length: currentRun });
-          runStart = commitDays[i];
           currentRun = 1;
         }
       }
       runs.push({ end: commitDays[commitDays.length - 1], length: currentRun });
-      
-      const today = toDateStr(new Date());
-      const yesterday = toDateStr(new Date(Date.now() - 86400000));
+
+      const todayStr = toDateStr(new Date());
+      const yesterdayStr = toDateStr(new Date(Date.now() - 86400000));
       const lastRun = runs[runs.length - 1];
-      streak = (lastRun.end === today || lastRun.end === yesterday) ? lastRun.length : 0;
+      streak =
+        lastRun.end === todayStr || lastRun.end === yesterdayStr
+          ? lastRun.length
+          : 0;
     }
   }
 
+  // Build ordered weekly array (last 8 weeks) for the chart
+  const weeklyCommits: Array<{ week: string; commits: number }> = [];
+  for (let i = 7; i >= 0; i--) {
+    const d = new Date();
+    const day = d.getUTCDay();
+    const diff = day === 0 ? -6 : 1 - day;
+    d.setUTCDate(d.getUTCDate() + diff - i * 7);
+    const weekKey = toDateStr(d);
+    weeklyCommits.push({ week: weekKey, commits: weeklyMap[weekKey] ?? 0 });
+  }
+
   // 3. Top Language from repos
-  const reposRes = await fetch(`${GITHUB_API}/users/${username}/repos?per_page=100&sort=pushed`, {
+  const reposUrl = new URL(`${GITHUB_API}/users/${encodedUsername}/repos`);
+  reposUrl.searchParams.set("per_page", "100");
+  reposUrl.searchParams.set("sort", "pushed");
+
+  const reposRes = await fetch(reposUrl.toString(), {
     headers: { Authorization: `Bearer ${session.accessToken}` },
-    next: { revalidate: 3600 },
+    cache: "no-store",
   });
-  
+
   if (reposRes.ok) {
-    const reposData = await reposRes.json();
+    const reposData: Array<{ language: string | null; fork: boolean }> =
+      await reposRes.json();
     const langCounts: Record<string, number> = {};
     for (const repo of reposData) {
-      if (repo.language) {
+      if (!repo.fork && repo.language) {
         langCounts[repo.language] = (langCounts[repo.language] || 0) + 1;
       }
     }
@@ -119,24 +178,37 @@ export async function GET(req: NextRequest) {
   }
 
   // 4. PRs
-  const prsRes = await fetch(
-    `${GITHUB_API}/search/issues?q=type:pr+author:${username}&per_page=1`,
-    {
-      headers: { Authorization: `Bearer ${session.accessToken}` },
-      next: { revalidate: 3600 },
-    }
-  );
+  const prsUrl = new URL(`${GITHUB_API}/search/issues`);
+  prsUrl.searchParams.set("q", `type:pr author:${normalizedUsername}`);
+  prsUrl.searchParams.set("per_page", "1");
+
+  const prsRes = await fetch(prsUrl.toString(), {
+    headers: { Authorization: `Bearer ${session.accessToken}` },
+    cache: "no-store",
+  });
   let prs = 0;
   if (prsRes.ok) {
     const prsData = await prsRes.json();
     prs = prsData.total_count || 0;
   }
 
-  return Response.json({
-    username,
+  const payload = {
+    username: normalizedUsername,
     streak,
     commits30d,
     topLanguage,
-    prs
-  });
+    prs,
+    weeklyCommits,
+  };
+
+  // Store in cache — best-effort, never fail the request over this
+  void supabaseAdmin
+    .from("comparison_cache")
+    .upsert({
+      cache_key: cacheKey,
+      target_username: normalizedUsername,
+      payload,
+    });
+
+  return Response.json({ ...payload, fromCache: false });
 }
